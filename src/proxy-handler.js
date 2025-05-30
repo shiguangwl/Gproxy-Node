@@ -3,6 +3,8 @@ const { ProxyResponse } = require('./entities');
 const logger = require('./utils/logger');
 const connectionManager = require('./utils/connection-manager');
 const configLoader = require('../config/config-loader');
+const cloudflareHandler = require('./utils/cloudflare-handler');
+const browserFingerprint = require('./utils/browser-fingerprint');
 
 /**
  * 增强的代理处理器核心函数
@@ -46,25 +48,72 @@ async function proxyHandler(requestInfo, upstream, preHandlers = [], postHandler
       headers: Object.keys(processedRequest.headers)
     });
 
-    // 使用连接管理器执行请求
-    const response = await connectionManager.executeWithRetry(
-      async (context) => {
-        return await performHttpRequest(context);
-      },
-      {
-        url: upstreamUrl,
-        method: processedRequest.method,
-        headers: processedRequest.headers,
-        data: processedRequest.data,
-        isMedia: isMedia,
-        isLargeFile: isLargeFile,
-        requestInfo: processedRequest
+    let response = null;
+    let cloudflareAttempted = false;
+
+    try {
+      // 使用连接管理器执行请求
+      response = await connectionManager.executeWithRetry(
+        async (context) => {
+          return await performHttpRequest(context);
+        },
+        {
+          url: upstreamUrl,
+          method: processedRequest.method,
+          headers: processedRequest.headers,
+          data: processedRequest.data,
+          isMedia: isMedia,
+          isLargeFile: isLargeFile,
+          requestInfo: processedRequest
+        }
+      );
+
+    } catch (error) {
+      // 如果是Cloudflare相关错误，尝试使用浏览器绕过
+      if (shouldAttemptCloudflareBypass(error, response)) {
+        logger.info('检测到可能的Cloudflare阻止，尝试浏览器绕过', {
+          url: upstreamUrl,
+          error: error.message
+        });
+
+        try {
+          cloudflareAttempted = true;
+          const bypassResult = await cloudflareHandler.bypassCloudflare(upstreamUrl);
+          
+          if (bypassResult.success) {
+            logger.info('Cloudflare绕过成功，使用获取的内容', {
+              url: upstreamUrl,
+              contentLength: bypassResult.content.length
+            });
+
+            // 创建模拟的axios响应对象
+            response = {
+              data: Buffer.from(bypassResult.content),
+              status: 200,
+              statusText: 'OK',
+              headers: {
+                'content-type': 'text/html; charset=utf-8',
+                'content-length': bypassResult.content.length.toString(),
+                ...bypassResult.headers
+              },
+              config: { url: upstreamUrl }
+            };
+          } else {
+            throw error; // 绕过失败，抛出原错误
+          }
+        } catch (bypassError) {
+          logger.warn('Cloudflare绕过失败:', bypassError.message);
+          throw error; // 抛出原错误
+        }
+      } else {
+        throw error; // 不是Cloudflare相关错误，直接抛出
       }
-    );
+    }
 
     // 创建代理响应对象
     const proxyResponse = new ProxyResponse(response);
     proxyResponse.proxyRequest = processedRequest;
+    proxyResponse.cloudflareBypassUsed = cloudflareAttempted;
 
     // 记录响应信息
     logger.info('代理请求完成', {
@@ -73,7 +122,8 @@ async function proxyHandler(requestInfo, upstream, preHandlers = [], postHandler
       contentType: response.headers['content-type'],
       contentLength: response.headers['content-length'],
       isMedia: isMedia,
-      isLargeFile: isLargeFile
+      isLargeFile: isLargeFile,
+      cloudflareBypassUsed: cloudflareAttempted
     });
 
     // 执行后置处理器
@@ -120,6 +170,13 @@ async function proxyHandler(requestInfo, upstream, preHandlers = [], postHandler
       return errorResponse;
     }
 
+    // 处理Cloudflare特定错误
+    if (isCloudflareError(error)) {
+      const errorResponse = createCloudflareErrorResponse(error);
+      errorResponse.proxyRequest = requestInfo;
+      return errorResponse;
+    }
+
     // 如果是HTTP响应错误，尝试返回原始响应
     if (error.response) {
       const proxyResponse = new ProxyResponse(error.response);
@@ -135,7 +192,152 @@ async function proxyHandler(requestInfo, upstream, preHandlers = [], postHandler
 }
 
 /**
- * 执行HTTP请求
+ * 判断是否应该尝试Cloudflare绕过
+ */
+function shouldAttemptCloudflareBypass(error, response) {
+  // 检查错误状态码
+  if (error.response) {
+    const status = error.response.status;
+    const cloudflareStatusCodes = [403, 503, 520, 521, 522, 523, 524, 525, 526, 527, 530];
+    if (cloudflareStatusCodes.includes(status)) {
+      return true;
+    }
+
+    // 检查响应头
+    const headers = error.response.headers || {};
+    if (headers['server'] && headers['server'].toLowerCase().includes('cloudflare')) {
+      return true;
+    }
+
+    if (headers['cf-ray'] || headers['cf-cache-status']) {
+      return true;
+    }
+  }
+
+  // 检查错误消息
+  const errorMessage = error.message.toLowerCase();
+  const cloudflareKeywords = ['cloudflare', 'cf-ray', 'ddos protection', 'checking your browser'];
+  return cloudflareKeywords.some(keyword => errorMessage.includes(keyword));
+}
+
+/**
+ * 判断是否是Cloudflare错误
+ */
+function isCloudflareError(error) {
+  if (error.response) {
+    const status = error.response.status;
+    const cloudflareStatusCodes = [520, 521, 522, 523, 524, 525, 526, 527, 530];
+    return cloudflareStatusCodes.includes(status);
+  }
+  return false;
+}
+
+/**
+ * 创建Cloudflare错误响应
+ */
+function createCloudflareErrorResponse(error) {
+  const status = error.response?.status || 503;
+  const statusText = getCloudflareErrorMessage(status);
+  
+  const errorHtml = `<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <title>Cloudflare 错误 ${status}</title>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style>
+        body { 
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            margin: 0; padding: 40px; 
+            background: linear-gradient(135deg, #ff7b7b 0%, #ff416c 100%);
+            color: #333; min-height: 100vh;
+            display: flex; align-items: center; justify-content: center;
+        }
+        .container { 
+            background: white; border-radius: 10px; 
+            padding: 40px; box-shadow: 0 10px 30px rgba(0,0,0,0.1);
+            max-width: 600px; text-align: center;
+        }
+        .error-code { 
+            font-size: 4em; font-weight: bold; 
+            color: #ff416c; margin-bottom: 20px;
+        }
+        .error-message { 
+            font-size: 1.2em; margin-bottom: 30px; 
+            color: #555;
+        }
+        .details { 
+            background: #f8f9fa; padding: 20px; 
+            border-radius: 5px; margin: 20px 0;
+            text-align: left; font-family: monospace;
+            font-size: 0.9em;
+        }
+        .retry-btn {
+            background: #ff416c; color: white;
+            padding: 12px 24px; border: none;
+            border-radius: 5px; cursor: pointer;
+            font-size: 1em; margin: 10px;
+            transition: background 0.3s;
+        }
+        .retry-btn:hover { background: #e73c57; }
+        .footer { margin-top: 30px; color: #7f8c8d; font-size: 0.9em; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="error-code">${status}</div>
+        <div class="error-message">${statusText}</div>
+        <div class="details">
+            <strong>错误类型:</strong> Cloudflare 服务错误<br>
+            <strong>时间:</strong> ${new Date().toLocaleString('zh-CN')}<br>
+            <strong>代理服务器:</strong> Gproxy-Node v2.1.0<br>
+            <strong>建议:</strong> 网站可能正在维护或遇到流量限制
+        </div>
+        <button class="retry-btn" onclick="location.reload()">重试</button>
+        <button class="retry-btn" onclick="history.back()">返回</button>
+        <div class="footer">
+            这是一个Cloudflare服务错误，通常是临时性的<br>
+            代理服务器已尝试自动处理，如果问题持续请稍后重试
+        </div>
+    </div>
+</body>
+</html>`;
+
+  return {
+    content: Buffer.from(errorHtml),
+    statusCode: status,
+    headers: {
+      'content-type': 'text/html; charset=utf-8',
+      'cache-control': 'no-cache',
+      'x-gproxy-error': 'cloudflare',
+      'x-gproxy-error-code': status.toString()
+    },
+    isRedirect: false,
+    contentType: 'text/html; charset=utf-8'
+  };
+}
+
+/**
+ * 获取Cloudflare错误消息
+ */
+function getCloudflareErrorMessage(status) {
+  const messages = {
+    520: '未知错误 - 网站返回了未知错误',
+    521: '网站服务器离线 - 网站服务器拒绝连接',
+    522: '连接超时 - 网站服务器响应超时',
+    523: '源站不可达 - 无法连接到网站服务器',
+    524: '超时发生 - 网站服务器未及时响应',
+    525: 'SSL握手失败 - SSL/TLS握手失败',
+    526: '无效的SSL证书 - 网站SSL证书无效',
+    527: 'Railgun错误 - Railgun连接错误',
+    530: '冻结网站 - 网站已被冻结'
+  };
+  
+  return messages[status] || '服务暂时不可用';
+}
+
+/**
+ * 执行HTTP请求（增强版）
  * @param {Object} context 请求上下文
  * @returns {Promise} axios响应对象
  */
@@ -146,11 +348,15 @@ async function performHttpRequest(context) {
   const urlObj = new URL(url);
   const agent = connectionManager.getAgent(urlObj.protocol);
   
+  // 应用浏览器指纹伪装
+  const domain = urlObj.hostname;
+  const enhancedHeaders = browserFingerprint.applyFingerprint({ ...headers }, domain);
+  
   // 配置axios请求选项
   const axiosConfig = {
     method: method,
     url: url,
-    headers: headers,
+    headers: enhancedHeaders,
     httpAgent: agent,
     httpsAgent: agent,
     timeout: isMedia ? 60000 : (isLargeFile ? 120000 : 30000), // 不同类型使用不同超时
@@ -179,7 +385,6 @@ async function performHttpRequest(context) {
     axiosConfig.headers = {
       ...axiosConfig.headers,
       'accept': '*/*',
-      'accept-encoding': 'identity', // 禁用压缩以避免处理复杂性
       'cache-control': 'no-cache',
       'connection': 'keep-alive'
     };
@@ -207,6 +412,12 @@ async function performHttpRequest(context) {
   // 添加请求标识
   axiosConfig.headers['x-gproxy-request-id'] = generateRequestId();
   axiosConfig.headers['x-gproxy-timestamp'] = Date.now().toString();
+
+  // 添加一些随机延迟以模拟人类行为
+  const delay = browserFingerprint.getRandomDelay();
+  if (delay > 0) {
+    await new Promise(resolve => setTimeout(resolve, delay));
+  }
 
   return await axios(axiosConfig);
 }
@@ -237,7 +448,9 @@ function isMediaRequest(urlPath) {
     /\/audio\//i,                               // 音频路径
     /\/media\//i,                               // 媒体路径
     /manifest\.(m3u8|mpd)/i,                   // 流媒体清单文件
-    /\.ts(\?|$)/i                              // HLS分片文件
+    /\.ts(\?|$)/i,                             // HLS分片文件
+    /chunk.*\.m4s/i,                           // DASH分片
+    /segment.*\.(ts|m4s)/i                     // 流媒体分片
   ];
   
   return mediaPatterns.some(pattern => pattern.test(urlPath));
@@ -314,6 +527,8 @@ function createErrorResponse(statusCode, message) {
             transition: background 0.3s;
         }
         .retry-btn:hover { background: #2980b9; }
+        .btn-danger { background: #e74c3c; }
+        .btn-danger:hover { background: #c0392b; }
         .footer { margin-top: 30px; color: #7f8c8d; font-size: 0.9em; }
         .metrics { font-size: 0.8em; color: #95a5a6; margin-top: 10px; }
     </style>
@@ -324,14 +539,16 @@ function createErrorResponse(statusCode, message) {
         <div class="error-message">${message}</div>
         <div class="details">
             <strong>时间:</strong> ${new Date().toLocaleString('zh-CN')}<br>
-            <strong>代理服务器:</strong> Gproxy-Node v2.0.0<br>
+            <strong>代理服务器:</strong> Gproxy-Node v2.1.0 Enhanced<br>
             <strong>请求ID:</strong> ${generateRequestId()}<br>
-            <strong>错误类型:</strong> ${getErrorType(statusCode)}
+            <strong>错误类型:</strong> ${getErrorType(statusCode)}<br>
+            <strong>Cloudflare支持:</strong> ✅ 已启用
         </div>
         <button class="retry-btn" onclick="location.reload()">重试</button>
         <button class="retry-btn" onclick="history.back()">返回</button>
         <div class="footer">
-            如果问题持续存在，请联系管理员或稍后重试
+            如果问题持续存在，请联系管理员或稍后重试<br>
+            增强版代理支持自动Cloudflare绕过
         </div>
         <div class="metrics">
             连接管理器统计: ${JSON.stringify(connectionManager.getMetrics(), null, 2)}
@@ -344,7 +561,8 @@ function createErrorResponse(statusCode, message) {
       'content-type': 'text/html; charset=utf-8',
       'cache-control': 'no-cache',
       'x-gproxy-error': 'true',
-      'x-gproxy-error-code': statusCode.toString()
+      'x-gproxy-error-code': statusCode.toString(),
+      'x-gproxy-version': '2.1.0'
     },
     isRedirect: false,
     contentType: 'text/html; charset=utf-8'
@@ -399,6 +617,10 @@ async function streamProxyHandler(requestInfo, upstream, res, preHandlers = []) 
       method: processedRequest.method,
       url: upstreamUrl
     });
+
+    // 应用浏览器指纹伪装
+    const domain = new URL(upstreamUrl).hostname;
+    processedRequest.headers = browserFingerprint.applyFingerprint(processedRequest.headers, domain);
 
     // 使用连接管理器执行流式请求
     const response = await connectionManager.executeWithRetry(

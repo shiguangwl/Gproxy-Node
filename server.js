@@ -29,7 +29,9 @@ const {
   createCustomHomePathHandler,
   securityHeaderHandler,
   requestBodyHandler,
-  youtubeHeaderHandler
+  youtubeHeaderHandler,
+  cloudflarePreHandler,
+  antiDetectionPreHandler
 } = require('./src/handlers/pre-handlers');
 
 const {
@@ -75,20 +77,24 @@ app.get('/health', (req, res) => {
   res.json({
     status: 'ok',
     timestamp: new Date().toISOString(),
-    version: '2.0.0',
+    version: '2.1.0',
     uptime: process.uptime(),
     memory: process.memoryUsage(),
     connectionPool: {
       successRate: connectionMetrics.successRate,
       averageResponseTime: connectionMetrics.averageResponseTime,
-      activeConnections: connectionMetrics.poolStatus
+      activeConnections: connectionMetrics.poolStatus,
+      cloudflareBypassRate: connectionMetrics.cloudflareBypassRate
     },
     features: {
       base64Encoding: true,
       streamProcessing: true,
       connectionPooling: true,
       intelligentRetry: true,
-      enhancedContentProcessing: true
+      enhancedContentProcessing: true,
+      cloudflareBypass: true,
+      browserFingerprintSpoofing: true,
+      antiDetection: true
     }
   });
 });
@@ -101,7 +107,7 @@ app.get('/admin/status', (req, res) => {
     
     res.json({
       system: {
-        version: '2.0.0',
+        version: '2.1.0',
         nodeVersion: process.version,
         platform: process.platform,
         arch: process.arch,
@@ -114,7 +120,8 @@ app.get('/admin/status', (req, res) => {
         baseUpstream: config.baseUpstream?.site,
         globalProxyPath: config.globalProxyPath,
         replaceRulesCount: config.replaceList.length,
-        denyRulesCount: config.denyRequestList.length
+        denyRulesCount: config.denyRequestList.length,
+        cloudflareBypass: process.env.CLOUDFLARE_BYPASS !== 'false'
       },
       connectionManager: connectionMetrics,
       features: {
@@ -127,7 +134,11 @@ app.get('/admin/status', (req, res) => {
         cssProcessing: '✅ CSS URL处理',
         jsProcessing: '✅ JavaScript URL处理',
         errorRecovery: '✅ 错误恢复机制',
-        performanceMonitoring: '✅ 性能监控'
+        performanceMonitoring: '✅ 性能监控',
+        cloudflareBypass: '✅ Cloudflare验证绕过',
+        browserFingerprint: '✅ 浏览器指纹伪装',
+        antiDetection: '✅ 反爬虫检测',
+        advancedTLS: '✅ 增强TLS配置'
       }
     });
   } catch (error) {
@@ -497,8 +508,13 @@ async function handleProxyRequest(req, res, mode) {
       method: req.method
     });
     
+    // 智能检测是否需要Cloudflare处理
+    const needsCloudflareHandling = isLikelyCloudflareProtected(upstream.host);
+    
     const preHandlers = [
       securityHeaderHandler,
+      antiDetectionPreHandler,
+      needsCloudflareHandling ? cloudflarePreHandler : null,
       mode === 'base' ? createCustomHomePathHandler(config.homePath) : null,
       preHandler,
       mediaPreHandler,
@@ -596,6 +612,28 @@ async function handleProxyRequest(req, res, mode) {
       });
     }
   }
+}
+
+/**
+ * 检测域名是否可能受Cloudflare保护
+ * @param {string} hostname 主机名
+ * @returns {boolean} 是否可能受保护
+ */
+function isLikelyCloudflareProtected(hostname) {
+  // 已知使用Cloudflare的常见网站
+  const cloudflareHosts = [
+    'discord.com',
+    'github.com',
+    'reddit.com',
+    'stackoverflow.com',
+    'medium.com',
+    'cloudflare.com',
+    'npmjs.com',
+    'jsdelivr.net',
+    'cdnjs.com'
+  ];
+  
+  return cloudflareHosts.some(host => hostname.includes(host));
 }
 
 // 请求时间记录中间件
@@ -706,9 +744,9 @@ const server = app.listen(PORT, HOST, async () => {
 
   console.log(`
 ╭─────────────────────────────────────────────────────────────╮
-│                  🚀 Gproxy-Node v2.0.0                     │
+│                  🚀 Gproxy-Node v2.1.0                     │
 │                                                             │
-│  ✨ 增强版全局代理服务器已启动                                 │
+│  ✨ 增强版全局代理服务器已启动 - Cloudflare支持             │
 │                                                             │
 │  🌐 服务地址: http://${HOST}:${PORT}                         │
 │  📊 管理界面: http://${HOST}:${PORT}/admin                   │
@@ -724,9 +762,14 @@ const server = app.listen(PORT, HOST, async () => {
 │  ├─ ✅ 媒体请求优化                                          │
 │  ├─ ✅ 流式大文件处理                                        │
 │  ├─ ✅ 实时性能监控                                          │
-│  └─ ✅ 错误恢复机制                                          │
+│  ├─ ✅ 错误恢复机制                                          │
+│  ├─ 🔥 Cloudflare验证绕过                                   │
+│  ├─ 🔥 浏览器指纹伪装                                        │
+│  ├─ 🔥 反爬虫检测                                            │
+│  └─ 🔥 增强TLS配置                                           │
 │                                                             │
 │  💡 管理提示: 访问 /admin 查看详细状态和管理功能               │
+│  🔒 Cloudflare: 自动检测和绕过验证挑战                      │
 │  📱 按 Ctrl+C 优雅停止服务器                                 │
 ╰─────────────────────────────────────────────────────────────╯
   `);
