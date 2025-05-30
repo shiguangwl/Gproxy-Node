@@ -1,0 +1,16 @@
+{
+  "base_upstream": "https://linux.do",
+  "home_path": "/",
+  "global_proxy_path": "proxy-dGltZWhv",
+  "deny_request": [],
+  "replace_list": [
+    {
+      "search": "$upstream",
+      "replace": "$custom_site",
+      "matchType": 1,
+      "urlMatch": null,
+      "urlExclude": null,
+      "contentType": null
+    }
+  ]
+}

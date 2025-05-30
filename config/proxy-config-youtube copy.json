@@ -1,0 +1,48 @@
+{
+  "base_upstream": "https://www.youtube.com",
+  "home_path": "/",
+  "global_proxy_path": "proxy-dGltZWhv",
+  "deny_request": [],
+  "replace_list": [
+    {
+      "search": "$upstream",
+      "replace": "$custom_site",
+      "matchType": 1,
+      "urlMatch": null,
+      "urlExclude": null,
+      "contentType": null
+    },
+    {
+      "search": "https://i.ytimg.com",
+      "replace": "$PROXY/https://i.ytimg.com",
+      "matchType": 1,
+      "urlMatch": null,
+      "urlExclude": null,
+      "contentType": null
+    },
+    {
+      "search": "https://www.youtube.com",
+      "replace": "$PROXY/https://www.youtube.com",
+      "matchType": 1,
+      "urlMatch": null,
+      "urlExclude": null,
+      "contentType": null
+    },
+    {
+      "search": "https://s.ytimg.com",
+      "replace": "$PROXY/https://s.ytimg.com",
+      "matchType": 1,
+      "urlMatch": null,
+      "urlExclude": null,
+      "contentType": null
+    },
+    {
+      "search": "https://yt3.ggpht.com",
+      "replace": "$PROXY/https://yt3.ggpht.com",
+      "matchType": 1,
+      "urlMatch": null,
+      "urlExclude": null,
+      "contentType": null
+    }
+  ]
+}
