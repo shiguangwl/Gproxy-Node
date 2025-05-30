@@ -65,78 +65,57 @@ class CloudflareHandler {
   }
 
   /**
-   * 检测是否遇到 Cloudflare 验证
-   */
-  isCloudflareChallenge(response) {
-    if (!response) return false;
-
-    // 检查状态码
-    if ([403, 503, 520, 521, 522, 523, 524, 525, 526, 527, 530].includes(response.status)) {
-      return true;
-    }
-
-    // 检查响应头
-    const server = response.headers['server'];
-    const cfRay = response.headers['cf-ray'];
-    const cfCache = response.headers['cf-cache-status'];
-    
-    if (server && server.toLowerCase().includes('cloudflare')) {
-      return true;
-    }
-
-    if (cfRay || cfCache) {
-      return true;
-    }
-
-    // 检查响应内容中的Cloudflare特征
-    if (response.data && typeof response.data === 'string') {
-      const cloudflarePatterns = [
-        /cloudflare/i,
-        /cf-ray/i,
-        /checking your browser/i,
-        /ddos protection/i,
-        /ray id/i,
-        /__cf_chl_jschl_tk__/i,
-        /cf-browser-verification/i,
-        /cf_clearance/i
-      ];
-
-      return cloudflarePatterns.some(pattern => pattern.test(response.data));
-    }
-
-    return false;
-  }
-
-  /**
    * 使用浏览器绕过 Cloudflare 验证
+   * @param {string} url - The URL to bypass
+   * @param {object} [fingerprintData=null] - Optional fingerprint data (userAgent, headers) to use
    */
-  async bypassCloudflare(url, options = {}) {
+  async bypassCloudflare(url, fingerprintData = null) {
     let page = null;
     let attempt = 0;
 
-    while (attempt < this.options.maxRetries) {
+    const userAgentToUse = fingerprintData?.userAgent || this.options.userAgent;
+    const headersToSet = fingerprintData?.headers || {
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+        'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+        // 'Accept-Encoding': 'gzip, deflate, br', // Puppeteer handles this
+        'Cache-Control': 'max-age=0',
+        'Sec-Ch-Ua': fingerprintData?.headers?.['sec-ch-ua'] || '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
+        'Sec-Ch-Ua-Mobile': fingerprintData?.headers?.['sec-ch-ua-mobile'] || '?0',
+        'Sec-Ch-Ua-Platform': fingerprintData?.headers?.['sec-ch-ua-platform'] || '"Windows"',
+        'Sec-Fetch-Dest': 'document',
+        'Sec-Fetch-Mode': 'navigate',
+        'Sec-Fetch-Site': 'none',
+        'Sec-Fetch-User': '?1',
+        'Upgrade-Insecure-Requests': '1'
+    };
+
+    // Ensure User-Agent in headersToSet matches userAgentToUse
+    headersToSet['User-Agent'] = userAgentToUse;
+
+    // Update browser launch args if a specific UA is passed via fingerprint
+    const launchOptions = { ...this.options };
+    if (fingerprintData?.userAgent && launchOptions.args) {
+        const uaArgIndex = launchOptions.args.findIndex(arg => arg.startsWith('--user-agent='));
+        if (uaArgIndex !== -1) {
+            launchOptions.args[uaArgIndex] = '--user-agent=' + userAgentToUse;
+        } else {
+            launchOptions.args.push('--user-agent=' + userAgentToUse);
+        }
+    }
+
+    while (attempt < launchOptions.maxRetries) { // Use potentially updated maxRetries
       try {
-        const browser = await this.initBrowser();
+        // Pass potentially updated launchOptions to initBrowser if it can take them,
+        // or re-initialize browser if UA has changed significantly.
+        // For now, assume initBrowser uses the constructor options or a new UA needs new browser.
+        // If UA is different from constructor, we might need to close and relaunch.
+        // This part is tricky with a shared browser instance.
+        // A simpler approach for now: page.setUserAgent overrides effectively.
+        const browser = await this.initBrowser(); // Consider passing launchOptions if UA changes
         page = await browser.newPage();
 
-        // 设置用户代理和其他浏览器特征
-        await page.setUserAgent(this.options.userAgent);
-        
-        // 设置额外的headers
-        await page.setExtraHTTPHeaders({
-          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
-          'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
-          'Accept-Encoding': 'gzip, deflate, br',
-          'Cache-Control': 'max-age=0',
-          'Sec-Ch-Ua': '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
-          'Sec-Ch-Ua-Mobile': '?0',
-          'Sec-Ch-Ua-Platform': '"Windows"',
-          'Sec-Fetch-Dest': 'document',
-          'Sec-Fetch-Mode': 'navigate',
-          'Sec-Fetch-Site': 'none',
-          'Sec-Fetch-User': '?1',
-          'Upgrade-Insecure-Requests': '1'
-        });
+        await page.setUserAgent(userAgentToUse);
+        await page.setExtraHTTPHeaders(headersToSet);
 
         // 还原之前的会话Cookie（如果有）
         const hostname = new URL(url).hostname;
@@ -169,7 +148,8 @@ class CloudflareHandler {
         logger.info('Cloudflare验证绕过成功', {
           originalUrl: url,
           finalUrl: finalUrl,
-          cookieCount: finalCookies.length
+          cookieCount: finalCookies.length,
+          usedUserAgent: userAgentToUse
         });
 
         await page.close();
@@ -191,13 +171,13 @@ class CloudflareHandler {
 
         attempt++;
         
-        if (attempt < this.options.maxRetries) {
+        if (attempt < launchOptions.maxRetries) {
           await this.sleep(2000 * attempt); // 递增延迟
         }
       }
     }
 
-    throw new Error(`Cloudflare验证绕过失败，已尝试 ${this.options.maxRetries} 次`);
+    throw new Error(`Cloudflare验证绕过失败，已尝试 ${launchOptions.maxRetries} 次`);
   }
 
   /**
@@ -205,25 +185,42 @@ class CloudflareHandler {
    */
   async waitForCloudflareClearance(page) {
     try {
-      // 等待页面中不再包含Cloudflare验证相关内容
+      logger.debug('等待Cloudflare验证挑战...');
+      // Option 1: Wait for navigation that might set the cookie or specific response
+      // await page.waitForNavigation({ waitUntil: 'networkidle0', timeout: this.options.challengeTimeout });
+
+      // Option 2: Wait for specific text to disappear AND/OR cf_clearance cookie
       await page.waitForFunction(() => {
-        const body = document.body.innerText.toLowerCase();
+        const bodyText = document.body?.innerText?.toLowerCase() || '';
         const cloudflareTexts = [
           'checking your browser',
           'ddos protection',
           'please wait',
-          'just a moment'
+          'just a moment',
+          'enable javascript and cookies' // Common on some CF pages
         ];
-        return !cloudflareTexts.some(text => body.includes(text));
+        const challengeTextFound = cloudflareTexts.some(text => bodyText.includes(text));
+        
+        const cookies = document.cookie || '';
+        const hasClearanceCookie = /cf_clearance=[^;]+/.test(cookies);
+        
+        return hasClearanceCookie || !challengeTextFound;
       }, { timeout: this.options.challengeTimeout });
 
-      // 额外等待一点时间确保页面完全加载
-      await this.sleep(2000);
+      // 额外等待确保所有脚本执行完毕和Cookie设置
+      await this.sleep(2500); // Increased slightly
 
-      logger.debug('Cloudflare验证挑战完成');
+      // Double check for cf_clearance cookie after waiting
+      const finalPageCookies = await page.cookies();
+      if (this.hasClearanceCookie(finalPageCookies)) {
+        logger.info('Cloudflare cf_clearance Cookie已找到。');
+      } else {
+        logger.warn('等待后未找到Cloudflare cf_clearance Cookie，可能验证未完全成功。');
+      }
+
     } catch (error) {
-      logger.debug('等待Cloudflare验证超时或未检测到验证页面');
-      // 不抛出错误，继续执行
+      logger.warn('等待Cloudflare验证超时或发生错误:', error.message);
+      // 不抛出错误，继续执行，后续的cookie和内容获取可能会失败或获取到质询页面
     }
   }
 

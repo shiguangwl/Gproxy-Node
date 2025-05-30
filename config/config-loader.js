@@ -13,6 +13,14 @@ class ConfigLoader {
     this.globalProxyPath = 'proxy-dGltZWhv';
     this.homePath = '/';
     this.customHandlers = [];
+    this.cloudflareProtectedHosts = [];
+    this.mediaRequestUrlPatterns = [];
+    this.largeFileUrlPatterns = [];
+    this.streamProcessingUrlPatterns = [];
+    this.cloudflareSensitiveHosts = [];
+    this.cloudflareDefaultCookies = [];
+    this.youtubeDefaultCookies = [];
+    this.youtubeClientVersion = '2.20240110.01.00';
     
     this.loadConfig();
   }
@@ -80,6 +88,36 @@ class ConfigLoader {
 
     // 解析自定义处理器
     this.customHandlers = this.config.custom_handlers || [];
+
+    // 解析Cloudflare保护的域名列表
+    this.cloudflareProtectedHosts = Array.isArray(this.config.cloudflare_protected_hosts) 
+      ? this.config.cloudflare_protected_hosts 
+      : [];
+
+    // 解析请求类型判断的 URL 模式
+    this.mediaRequestUrlPatterns = Array.isArray(this.config.media_request_url_patterns)
+      ? this.config.media_request_url_patterns.map(p => new RegExp(p, 'i'))
+      : [];
+    this.largeFileUrlPatterns = Array.isArray(this.config.large_file_url_patterns)
+      ? this.config.large_file_url_patterns.map(p => new RegExp(p, 'i'))
+      : [];
+    this.streamProcessingUrlPatterns = Array.isArray(this.config.stream_processing_url_patterns)
+      ? this.config.stream_processing_url_patterns.map(p => new RegExp(p, 'i'))
+      : [];
+
+    // 解析 pre-handlers 相关配置 (新增)
+    this.cloudflareSensitiveHosts = Array.isArray(this.config.cloudflare_sensitive_hosts)
+      ? this.config.cloudflare_sensitive_hosts
+      : [];
+    this.cloudflareDefaultCookies = Array.isArray(this.config.cloudflare_default_cookies)
+      ? this.config.cloudflare_default_cookies
+      : [];
+    this.youtubeDefaultCookies = Array.isArray(this.config.youtube_default_cookies)
+      ? this.config.youtube_default_cookies
+      : [];
+    this.youtubeClientVersion = typeof this.config.youtube_client_version === 'string'
+      ? this.config.youtube_client_version
+      : '2.20240110.01.00';
   }
 
   /**
@@ -91,6 +129,73 @@ class ConfigLoader {
       "home_path": "/",
       "global_proxy_path": "proxy-dGltZWhv",
       "deny_request": [],
+      "cloudflare_protected_hosts": [
+        "discord.com",
+        "github.com",
+        "reddit.com",
+        "stackoverflow.com",
+        "medium.com",
+        "cloudflare.com",
+        "npmjs.com",
+        "jsdelivr.net",
+        "cdnjs.com",
+        "linux.do"
+      ],
+      "media_request_url_patterns": [
+        "\\.(mp4|avi|mkv|mov|wmv|flv|webm)(\\?|$)",
+        "\\.(mp3|wav|flac|aac|ogg|m4a)(\\?|$)",
+        "videoplayback",
+        "googlevideo\\.com",
+        "ytimg\\.com.*\\.(jpg|jpeg|png|webp)",
+        "/stream/",
+        "/video/",
+        "/audio/",
+        "/media/",
+        "manifest\\.(m3u8|mpd)",
+        "\\.ts(\\?|$)",
+        "chunk.*\\.m4s",
+        "segment.*\\.(ts|m4s)"
+      ],
+      "large_file_url_patterns": [
+        "\\.(zip|rar|7z|tar|gz|bz2)(\\?|$)",
+        "\\.(iso|img|dmg)(\\?|$)",
+        "\\.(pdf|doc|docx|ppt|pptx|xls|xlsx)(\\?|$)",
+        "/download/",
+        "/files/",
+        "\\.exe(\\?|$)",
+        "\\.msi(\\?|$)",
+        "\\.pkg(\\?|$)",
+        "\\.deb(\\?|$)",
+        "\\.rpm(\\?|$)"
+      ],
+      "stream_processing_url_patterns": [
+        "\\.(mp4|avi|mkv|mov|wmv|flv|webm)$", 
+        "\\.(mp3|wav|flac|aac|ogg)$",
+        "\\.(zip|rar|7z|tar|gz|bz2)$",
+        "\\.(pdf|doc|docx|ppt|pptx)$", 
+        "\\.(iso|img|dmg)$",
+        "/download/",
+        "/stream/", 
+        "/files/"
+      ],
+      "cloudflare_sensitive_hosts": [
+        "discord.com",
+        "github.com",
+        "reddit.com",
+        "stackoverflow.com",
+        "medium.com"
+      ],
+      "cloudflare_default_cookies": [
+        "_ga=GA1.1.000000000.0000000000",
+        "_gid=GA1.1.000000000.0000000000"
+      ],
+      "youtube_default_cookies": [
+        "CONSENT=YES+cb.20210720-07-p0.en+FX+000",
+        "VISITOR_INFO1_LIVE=ExampleCookie",
+        "YSC=ExampleSessionCookie",
+        "PREF=tz=Asia.Shanghai&f6=00000000"
+      ],
+      "youtube_client_version": "2.20240201.01.00",
       "replace_list": [
         {
           "search": "$upstream",
@@ -167,7 +272,15 @@ class ConfigLoader {
       replaceList: this.replaceList,
       globalProxyPath: this.globalProxyPath,
       homePath: this.homePath,
-      customHandlers: this.customHandlers
+      customHandlers: this.customHandlers,
+      cloudflareProtectedHosts: this.cloudflareProtectedHosts,
+      mediaRequestUrlPatterns: this.mediaRequestUrlPatterns,
+      largeFileUrlPatterns: this.largeFileUrlPatterns,
+      streamProcessingUrlPatterns: this.streamProcessingUrlPatterns,
+      cloudflareSensitiveHosts: this.cloudflareSensitiveHosts,
+      cloudflareDefaultCookies: this.cloudflareDefaultCookies,
+      youtubeDefaultCookies: this.youtubeDefaultCookies,
+      youtubeClientVersion: this.youtubeClientVersion
     };
   }
 

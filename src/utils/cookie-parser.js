@@ -1,130 +1,117 @@
 const { Cookie, CookieJar } = require('tough-cookie');
+const logger = require('./logger');
 
 class CookieManager {
   constructor() {
-    this.jar = new CookieJar();
+    this.jar = new CookieJar(undefined, { // Use default MemoryStore
+        allowSpecialUseDomain: true, 
+        rejectPublicSuffixes: false, 
+        looseMode: true 
+    });
   }
 
   /**
-   * 解析响应中的Set-Cookie头部
-   * @param {Array} setCookieHeaders - Set-Cookie头部数组
-   * @param {string} upstreamUrl - 上游URL
-   * @param {string} proxyUrl - 代理URL
-   * @returns {Array} 转换后的Set-Cookie头部
+   * Processes Set-Cookie headers received from an upstream server.
+   * Stores cookies in the internal jar (associated with upstreamUrl)
+   * and returns an array of modified Set-Cookie strings to be sent to the client via the proxy.
+   *
+   * @param {Array<string>|string} setCookieHeaders Headers from upstream.
+   * @param {string} upstreamUrl URL from which cookies were received (current request's URL to upstream).
+   * @param {string} proxyUrl URL the client is talking to (the proxy server's public URL for this request context).
+   * @returns {Array<string>} Modified Set-Cookie strings for the client.
    */
-  parseAndConvertSetCookies(setCookieHeaders, upstreamUrl, proxyUrl) {
-    if (!setCookieHeaders || setCookieHeaders.length === 0) {
-      return [];
-    }
+  handleSetCookieFromUpstream(setCookieHeaders, upstreamUrl, proxyUrl) {
+    if (!setCookieHeaders) return [];
+    const headersArray = Array.isArray(setCookieHeaders) ? setCookieHeaders : [setCookieHeaders];
+    if (headersArray.length === 0) return [];
 
-    const upstreamDomain = new URL(upstreamUrl).hostname;
-    const proxyDomain = new URL(proxyUrl).hostname;
-    const convertedCookies = [];
+    const proxyHost = new URL(proxyUrl).hostname;
+    const proxyIsHttp = new URL(proxyUrl).protocol === 'http:';
+    const modifiedClientCookieStrings = [];
 
-    setCookieHeaders.forEach(cookieStr => {
+    headersArray.forEach(cookieStr => {
       try {
-        const cookie = Cookie.parse(cookieStr);
-        if (cookie) {
-          // 转换域名
-          if (cookie.domain) {
-            if (cookie.domain === upstreamDomain || cookie.domain === `.${upstreamDomain}`) {
-              cookie.domain = proxyDomain;
-            } else if (cookie.domain.endsWith(upstreamDomain)) {
-              cookie.domain = cookie.domain.replace(upstreamDomain, proxyDomain);
-            }
-          } else {
-            // 如果没有明确的域名，设置为代理域名
-            cookie.domain = proxyDomain;
-          }
+        // Store the original cookie from upstream into our jar.
+        // The jar associates it with upstreamUrl (tough-cookie handles domain/path from cookie string).
+        this.jar.setCookieSync(cookieStr, upstreamUrl, { ignoreError: false, loose: true });
 
-          // 确保cookie适用于代理域名
-          cookie.hostOnly = false;
-          
-          // 移除secure标志(如果代理服务器不是HTTPS)
-          const proxyIsHttps = proxyUrl.startsWith('https://');
-          if (!proxyIsHttps && cookie.secure) {
-            cookie.secure = false;
-          }
-
-          convertedCookies.push(cookie.toString());
+        // Now, create a version of this cookie to send to the client,
+        // as if the proxy server (proxyUrl) is setting it.
+        let clientCookie = Cookie.parse(cookieStr, { loose: true });
+        if (!clientCookie) {
+            logger.warn('无法解析Set-Cookie字符串，跳过客户端转换:', { cookieStr });
+            // modifiedClientCookieStrings.push(cookieStr); // Optionally pass original if critical
+            return; 
         }
+
+        // 1. Domain: Change to proxy's domain for the cookie being sent to the client.
+        clientCookie.domain = proxyHost;
+        // When domain is explicitly set, hostOnly should typically be false.
+        // tough-cookie usually handles this if domain starts with a dot, or infers.
+        // Let's be explicit if we set domain like this.
+        clientCookie.hostOnly = false; 
+
+        // 2. Secure attribute: Remove if proxy is HTTP, as client won't send it back.
+        if (proxyIsHttp && clientCookie.secure) {
+          clientCookie.secure = false;
+        }
+
+        // 3. SameSite attribute adjustment for client-facing cookie
+        let sameSiteValue = clientCookie.sameSite ? clientCookie.sameSite.toLowerCase() : 'lax'; // Default to lax
+
+        if (proxyIsHttp && sameSiteValue === 'none') {
+          sameSiteValue = 'lax'; // SameSite=None is invalid over HTTP
+        }
+        // If proxy is HTTPS and original cookie was SameSite=None but NOT Secure, 
+        // then this combination is problematic. Change to Lax.
+        if (!proxyIsHttp && sameSiteValue === 'none' && !clientCookie.secure) {
+          sameSiteValue = 'lax';
+          logger.debug('将SameSite=None改为Lax，因为在HTTPS代理上Secure属性为false/缺失', { name: clientCookie.key });
+        }
+        clientCookie.sameSite = sameSiteValue;
+        
+        // Path, HttpOnly, Expires, Max-Age are generally kept as is from original cookie.
+        // Path will be interpreted by the client relative to the (new) domain (proxyHost).
+
+        modifiedClientCookieStrings.push(clientCookie.toString());
+
       } catch (error) {
-        console.warn('解析Cookie失败:', error.message);
-        // 如果解析失败，尝试简单的字符串替换
-        const convertedCookieStr = cookieStr.replace(
-          new RegExp(`domain=${upstreamDomain}`, 'gi'),
-          `domain=${proxyDomain}`
-        );
-        convertedCookies.push(convertedCookieStr);
+        logger.warn('处理Set-Cookie头为客户端时出错:', { cookie: cookieStr, error: error.message, stack: error.stack });
+        // Fallback can be to push the original string, but it might have wrong domain for client
+        // For now, if parsing/conversion fails badly, we skip sending this cookie to client.
       }
     });
-
-    return convertedCookies;
+    return modifiedClientCookieStrings;
   }
 
   /**
-   * 转换请求中的Cookie头部
-   * @param {string} cookieHeader - Cookie头部字符串
-   * @param {string} proxyUrl - 代理URL
-   * @param {string} upstreamUrl - 上游URL
-   * @returns {string} 转换后的Cookie字符串
+   * Gets the Cookie header string to be sent to an upstream server.
+   * Retrieves cookies from the internal jar that match the upstreamUrl.
+   *
+   * @param {string} upstreamUrl URL the request is being sent to.
+   * @returns {string} Cookie header string, or empty string if no suitable cookies.
    */
-  convertRequestCookies(cookieHeader, proxyUrl, upstreamUrl) {
-    if (!cookieHeader) {
+  getCookiesForUpstream(upstreamUrl) {
+    try {
+      const cookies = this.jar.getCookieStringSync(upstreamUrl, { http: true }); 
+      logger.debug('为上游获取到的Cookies:', { upstreamUrl, count: cookies ? cookies.split(';').length : 0 });
+      return cookies || '';
+    } catch (error) {
+      logger.error('从Jar中为上游获取Cookies失败:', { upstreamUrl, error: error.message });
       return '';
     }
-
-    // 简单的域名替换，实际应用中可能需要更复杂的逻辑
-    const proxyDomain = new URL(proxyUrl).hostname;
-    const upstreamDomain = new URL(upstreamUrl).hostname;
-    
-    return cookieHeader.replace(
-      new RegExp(proxyDomain, 'g'),
-      upstreamDomain
-    );
   }
 
   /**
-   * 检查Cookie是否应该被发送到指定的URL
-   * @param {string} cookieStr - Cookie字符串
-   * @param {string} url - 目标URL
-   * @returns {boolean} 是否应该发送
+   * (Optional) Clears all cookies from the jar. Useful for testing or session reset.
    */
-  shouldSendCookie(cookieStr, url) {
-    try {
-      const cookie = Cookie.parse(cookieStr);
-      if (!cookie) return false;
-
-      const urlObj = new URL(url);
-      
-      // 检查域名匹配
-      if (cookie.domain) {
-        const domain = cookie.domain.startsWith('.') ? cookie.domain.slice(1) : cookie.domain;
-        if (!urlObj.hostname.endsWith(domain)) {
-          return false;
-        }
-      }
-
-      // 检查路径匹配
-      if (cookie.path && !urlObj.pathname.startsWith(cookie.path)) {
-        return false;
-      }
-
-      // 检查HTTPS
-      if (cookie.secure && urlObj.protocol !== 'https:') {
-        return false;
-      }
-
-      // 检查过期时间
-      if (cookie.expires && cookie.expires < new Date()) {
-        return false;
-      }
-
-      return true;
-    } catch (error) {
-      console.warn('检查Cookie有效性失败:', error.message);
-      return true; // 默认允许发送
-    }
+  clearAllCookies() {
+    this.jar = new CookieJar(undefined, { 
+        allowSpecialUseDomain: true, 
+        rejectPublicSuffixes: false, 
+        looseMode: true 
+    });
+    logger.info('Cookie管理器中的所有Cookie已被清除。');
   }
 }
 

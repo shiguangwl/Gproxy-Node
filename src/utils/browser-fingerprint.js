@@ -1,12 +1,13 @@
 const UserAgent = require('user-agents');
-const randomUserAgent = require('random-useragent');
+// const randomUserAgent = require('random-useragent'); // 移除未使用的库
 
 /**
  * 浏览器指纹伪装管理器
  */
 class BrowserFingerprint {
   constructor() {
-    this.userAgentGenerator = new UserAgent();
+    // Configure user-agents for more control if needed, e.g., only desktops
+    this.userAgentGenerator = new UserAgent({ deviceCategory: 'desktop' }); 
     this.currentFingerprint = null;
     this.fingerprintCache = new Map();
   }
@@ -15,147 +16,54 @@ class BrowserFingerprint {
    * 生成完整的浏览器指纹
    */
   generateFingerprint(domain = null) {
-    // 如果已经为该域名生成过指纹，复用它
     if (domain && this.fingerprintCache.has(domain)) {
       return this.fingerprintCache.get(domain);
     }
 
-    const userAgent = this.generateUserAgent();
+    // const userAgentString = this.generateUserAgent(); // 旧方法
+    const uaInstance = this.userAgentGenerator.random(); // 使用库生成UA对象
+    const userAgentString = uaInstance.toString();
+    const parsedUA = uaInstance.data; // 使用库的解析结果
+
     const fingerprint = {
-      userAgent: userAgent,
-      ...this.parseUserAgent(userAgent),
-      headers: this.generateHeaders(userAgent),
-      tlsSettings: this.generateTLSSettings(),
-      behaviorPattern: this.generateBehaviorPattern()
+      userAgent: userAgentString,
+      parsedUA: parsedUA, // Store parsed data from the library
+      // ...this.parseUserAgent(userAgentString), // 不再需要手动解析
+      headers: this.generateHeaders(userAgentString, parsedUA),
+      // tlsSettings: this.generateTLSSettings(), // 它的实际作用有限，暂时注释
+      behaviorPattern: this.generateBehaviorPattern(parsedUA)
     };
 
-    // 缓存指纹
     if (domain) {
       this.fingerprintCache.set(domain, fingerprint);
     }
-
     this.currentFingerprint = fingerprint;
     return fingerprint;
   }
 
   /**
-   * 生成用户代理字符串
+   * 生成用户代理字符串 (此方法将被库替代，但保留概念或移除)
+   * @deprecated Prefer using this.userAgentGenerator.random()
    */
-  generateUserAgent() {
-    // 80% 使用Chrome，15% 使用Edge，5% 使用Firefox
-    const random = Math.random();
-    
-    if (random < 0.8) {
-      return this.generateChromeUserAgent();
-    } else if (random < 0.95) {
-      return this.generateEdgeUserAgent();
-    } else {
-      return this.generateFirefoxUserAgent();
-    }
-  }
+  // generateUserAgent() { ... } // 移除旧的系列 UA 生成函数
+  // generateChromeUserAgent() { ... }
+  // generateEdgeUserAgent() { ... }
+  // generateFirefoxUserAgent() { ... }
 
   /**
-   * 生成Chrome用户代理
+   * 解析用户代理字符串 (此方法将被库替代)
+   * @deprecated Prefer using the .data property from user-agents instance
    */
-  generateChromeUserAgent() {
-    const versions = [
-      '120.0.0.0',
-      '119.0.0.0', 
-      '118.0.0.0',
-      '117.0.0.0',
-      '116.0.0.0'
-    ];
-    
-    const platforms = [
-      'Windows NT 10.0; Win64; x64',
-      'Windows NT 11.0; Win64; x64',
-      'Macintosh; Intel Mac OS X 10_15_7',
-      'X11; Linux x86_64'
-    ];
-
-    const version = versions[Math.floor(Math.random() * versions.length)];
-    const platform = platforms[Math.floor(Math.random() * platforms.length)];
-    
-    return `Mozilla/5.0 (${platform}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${version} Safari/537.36`;
-  }
-
-  /**
-   * 生成Edge用户代理
-   */
-  generateEdgeUserAgent() {
-    const versions = [
-      '120.0.0.0',
-      '119.0.0.0',
-      '118.0.0.0'
-    ];
-    
-    const version = versions[Math.floor(Math.random() * versions.length)];
-    return `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${version} Safari/537.36 Edg/${version}`;
-  }
-
-  /**
-   * 生成Firefox用户代理
-   */
-  generateFirefoxUserAgent() {
-    const versions = [
-      '121.0',
-      '120.0',
-      '119.0',
-      '118.0'
-    ];
-    
-    const version = versions[Math.floor(Math.random() * versions.length)];
-    return `Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:${version}) Gecko/20100101 Firefox/${version}`;
-  }
-
-  /**
-   * 解析用户代理字符串
-   */
-  parseUserAgent(userAgent) {
-    const isChrome = userAgent.includes('Chrome') && !userAgent.includes('Edg');
-    const isEdge = userAgent.includes('Edg');
-    const isFirefox = userAgent.includes('Firefox');
-    const isWindows = userAgent.includes('Windows');
-    const isMac = userAgent.includes('Macintosh');
-    const isLinux = userAgent.includes('Linux');
-
-    let browser = 'Chrome';
-    if (isEdge) browser = 'Edge';
-    else if (isFirefox) browser = 'Firefox';
-
-    let os = 'Windows';
-    if (isMac) os = 'macOS';
-    else if (isLinux) os = 'Linux';
-
-    let version = '120';
-    const chromeMatch = userAgent.match(/Chrome\/(\d+)/);
-    const firefoxMatch = userAgent.match(/Firefox\/(\d+)/);
-    const edgeMatch = userAgent.match(/Edg\/(\d+)/);
-    
-    if (chromeMatch) version = chromeMatch[1];
-    else if (firefoxMatch) version = firefoxMatch[1];
-    else if (edgeMatch) version = edgeMatch[1];
-
-    return {
-      browser,
-      version,
-      os,
-      isChrome,
-      isEdge,
-      isFirefox,
-      isWindows,
-      isMac,
-      isLinux
-    };
-  }
+  // parseUserAgent(userAgent) { ... } // 移除旧的解析函数
 
   /**
    * 生成完整的HTTP头部
+   * @param {string} userAgentString - The User-Agent string
+   * @param {object} parsedUA - Parsed UA data from user-agents library
    */
-  generateHeaders(userAgent) {
-    const parsed = this.parseUserAgent(userAgent);
+  generateHeaders(userAgentString, parsedUA) {
     const headers = {
-      'User-Agent': userAgent,
+      'User-Agent': userAgentString,
       'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
       'Accept-Language': this.generateAcceptLanguage(),
       'Accept-Encoding': 'gzip, deflate, br',
@@ -163,24 +71,40 @@ class BrowserFingerprint {
       'Upgrade-Insecure-Requests': '1'
     };
 
-    // Chrome/Edge 特定头部
-    if (parsed.isChrome || parsed.isEdge) {
-      const brand = parsed.isEdge ? 'Microsoft Edge' : 'Google Chrome';
-      const brandVersion = parsed.version;
-      
-      headers['Sec-Ch-Ua'] = `"${brand}";v="${brandVersion}", "Chromium";v="${brandVersion}", "Not_A Brand";v="8"`;
-      headers['Sec-Ch-Ua-Mobile'] = '?0';
-      headers['Sec-Ch-Ua-Platform'] = parsed.isWindows ? '"Windows"' : 
-                                      parsed.isMac ? '"macOS"' : '"Linux"';
-      headers['Sec-Fetch-Dest'] = 'document';
-      headers['Sec-Fetch-Mode'] = 'navigate';
-      headers['Sec-Fetch-Site'] = 'none';
-      headers['Sec-Fetch-User'] = '?1';
-    }
+    // Sec-CH-UA headers based on parsedUA data
+    // Note: user-agents library provides `ब्रांड` (brand) in devanagari script for " Not A;Brand " sometimes.
+    // We need to be careful or use a more specific way to get brand info if available.
+    const browserName = parsedUA.browser || 'Chrome'; // Default to Chrome if not specified
+    const browserVersion = parsedUA.version || (parsedUA.browserVersion || '120'); // Use .version or .browserVersion
+    const platformName = parsedUA.platform || 'Windows'; // e.g. "Windows", "macOS", "Linux"
 
-    // Firefox 特定头部
-    if (parsed.isFirefox) {
-      headers['DNT'] = '1';
+    // Construct Sec-CH-UA based on browser
+    // This is a simplified construction. Real browsers have more complex rules.
+    let secChUa = '';
+    if (browserName.toLowerCase().includes('chrome')) {
+      secChUa = `"Google Chrome";v="${browserVersion}", "Chromium";v="${browserVersion}", "Not_A Brand";v="8"`;
+    } else if (browserName.toLowerCase().includes('edge')) {
+      secChUa = `"Microsoft Edge";v="${browserVersion}", "Chromium";v="${browserVersion}", "Not_A Brand";v="8"`;
+    } else if (browserName.toLowerCase().includes('firefox')) {
+      // Firefox doesn't typically send Sec-CH-UA by default in the same way, but some experiments exist.
+      // For now, we don't add it for Firefox to mimic default behavior.
+    } else {
+      // Fallback for other browsers or if info is missing
+      secChUa = `"Chromium";v="${browserVersion}", "Not_A Brand";v="8"`; 
+    }
+    
+    if (secChUa) headers['Sec-Ch-Ua'] = secChUa;
+    headers['Sec-Ch-Ua-Mobile'] = '?0'; // Assuming desktop from constructor
+    headers['Sec-Ch-Ua-Platform'] = `"${platformName}"`;
+    
+    // Common sec-fetch headers (might vary slightly by browser/context)
+    headers['Sec-Fetch-Dest'] = 'document';
+    headers['Sec-Fetch-Mode'] = 'navigate';
+    headers['Sec-Fetch-Site'] = 'none'; // For initial navigation
+    headers['Sec-Fetch-User'] = '?1';
+
+    if (browserName.toLowerCase().includes('firefox')) {
+      headers['DNT'] = '1'; // Common for Firefox
     }
 
     return headers;
@@ -202,35 +126,15 @@ class BrowserFingerprint {
   }
 
   /**
-   * 生成TLS设置
+   * 生成TLS设置 (Commented out as its practical application is limited in Node.js)
    */
-  generateTLSSettings() {
-    return {
-      minVersion: 'TLSv1.2',
-      maxVersion: 'TLSv1.3',
-      ciphers: [
-        'TLS_AES_128_GCM_SHA256',
-        'TLS_AES_256_GCM_SHA384',
-        'TLS_CHACHA20_POLY1305_SHA256',
-        'ECDHE-RSA-AES128-GCM-SHA256',
-        'ECDHE-RSA-AES256-GCM-SHA384'
-      ],
-      curves: ['X25519', 'prime256v1', 'secp384r1'],
-      signatureAlgorithms: [
-        'ecdsa_secp256r1_sha256',
-        'rsa_pss_rsae_sha256',
-        'rsa_pkcs1_sha256',
-        'ecdsa_secp384r1_sha384',
-        'rsa_pss_rsae_sha384',
-        'rsa_pkcs1_sha384'
-      ]
-    };
-  }
+  // generateTLSSettings() { ... }
 
   /**
    * 生成行为模式
+   * @param {object} parsedUA - Parsed UA data from user-agents library (can be used to customize behavior)
    */
-  generateBehaviorPattern() {
+  generateBehaviorPattern(parsedUA) { // parsedUA can be used here if desired
     return {
       requestInterval: 100 + Math.random() * 200, // 100-300ms
       connectTimeout: 5000 + Math.random() * 5000, // 5-10s

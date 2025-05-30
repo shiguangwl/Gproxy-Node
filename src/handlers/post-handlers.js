@@ -2,10 +2,11 @@ const { URL } = require('url');
 const zlib = require('zlib');
 const CookieManager = require('../utils/cookie-parser');
 const logger = require('../utils/logger');
-const configLoader = require('../../config/config-loader');
+const configLoader = require('../config/config-loader');
 const { promisify } = require('util');
 const fs = require('fs-extra');
 const path = require('path');
+const { HandlerError } = require('../utils/errors');
 
 const cookieManager = new CookieManager();
 
@@ -15,33 +16,36 @@ const inflate = promisify(zlib.inflate);
 const brotliDecompress = promisify(zlib.brotliDecompress);
 
 /**
- * 智能内容类型检测
+ * 智能内容类型检测，结合Content-Type头部和内容启发式分析。
+ * @param {object} headers 响应头部对象。
+ * @param {Buffer} content 响应内容Buffer。
+ * @returns {object} 包含isHtml, isCss, isJavaScript, isJson, isXml等布尔标志以及contentType字符串的对象。
  */
 function detectContentType(headers, content) {
-  const contentType = headers['content-type'] || '';
+  const contentTypeHeader = headers['content-type'] || '';
   
-  // 如果有明确的content-type，使用它
-  if (contentType) {
+  if (contentTypeHeader) {
     return {
-      isHtml: contentType.includes('text/html'),
-      isCss: contentType.includes('text/css'),
-      isJavaScript: contentType.includes('javascript') || contentType.includes('application/json'),
-      isXml: contentType.includes('xml'),
-      isImage: contentType.includes('image/'),
-      isVideo: contentType.includes('video/'),
-      isAudio: contentType.includes('audio/'),
-      isPdf: contentType.includes('application/pdf'),
-      isBinary: contentType.includes('application/octet-stream') || 
-                contentType.includes('image/') || 
-                contentType.includes('video/') || 
-                contentType.includes('audio/') ||
-                contentType.includes('application/pdf') ||
-                contentType.includes('application/zip'),
-      isText: contentType.includes('text/') || 
-              contentType.includes('application/json') || 
-              contentType.includes('application/javascript') ||
-              contentType.includes('application/xml'),
-      contentType: contentType
+      isHtml: contentTypeHeader.includes('text/html'),
+      isCss: contentTypeHeader.includes('text/css'),
+      isJavaScript: contentTypeHeader.includes('application/javascript') || contentTypeHeader.includes('text/javascript'),
+      isJson: contentTypeHeader.includes('application/json'),
+      isXml: contentTypeHeader.includes('application/xml') || contentTypeHeader.includes('text/xml'),
+      isImage: contentTypeHeader.includes('image/'),
+      isVideo: contentTypeHeader.includes('video/'),
+      isAudio: contentTypeHeader.includes('audio/'),
+      isPdf: contentTypeHeader.includes('application/pdf'),
+      isBinary: contentTypeHeader.includes('application/octet-stream') || 
+                contentTypeHeader.includes('image/') || 
+                contentTypeHeader.includes('video/') || 
+                contentTypeHeader.includes('audio/') ||
+                contentTypeHeader.includes('application/pdf') ||
+                contentTypeHeader.includes('application/zip'),
+      isText: contentTypeHeader.includes('text/') || 
+              contentTypeHeader.includes('application/json') || 
+              contentTypeHeader.includes('application/javascript') ||
+              contentTypeHeader.includes('application/xml'),
+      contentType: contentTypeHeader
     };
   }
   
@@ -62,11 +66,7 @@ function detectContentType(headers, content) {
     
     // 如果超过30%的字节是二进制，认为是二进制文件
     if (binaryByteCount / sample.length > 0.3) {
-      return { 
-        isBinary: true, 
-        isText: false, 
-        contentType: 'application/octet-stream' 
-      };
+      return { isBinary: true, isText: false, contentType: 'application/octet-stream', isHtml: false, isCss: false, isJavaScript: false, isJson: false, isXml: false };
     }
     
     const contentStr = content.slice(0, 1024).toString('utf8', 0, Math.min(1024, content.length));
@@ -74,98 +74,107 @@ function detectContentType(headers, content) {
     // 检测HTML
     if (contentStr.includes('<!DOCTYPE') || contentStr.includes('<html') || 
         contentStr.includes('<HTML') || contentStr.includes('<head>')) {
-      return { isHtml: true, isText: true, contentType: 'text/html' };
+      return { isHtml: true, isText: true, contentType: 'text/html', isJson: false, isXml: false };
     }
     
     // 检测CSS
     if (contentStr.includes('@import') || contentStr.includes('@media') || 
         /\.[a-zA-Z-]+\s*\{/.test(contentStr)) {
-      return { isCss: true, isText: true, contentType: 'text/css' };
+      return { isCss: true, isText: true, contentType: 'text/css', isJson: false, isXml: false };
     }
     
     // 检测JavaScript
     if (contentStr.includes('function') || contentStr.includes('var ') || 
         contentStr.includes('const ') || contentStr.includes('let ') ||
-        contentStr.includes('=>') || contentStr.includes('JSON')) {
-      return { isJavaScript: true, isText: true, contentType: 'application/javascript' };
+        contentStr.includes('=>')) {
+      return { isJavaScript: true, isText: true, contentType: 'application/javascript', isJson: false, isHtml: false, isCss: false, isXml: false };
     }
     
     // 检测XML
     if (contentStr.includes('<?xml') || contentStr.includes('<rss') || 
         contentStr.includes('<feed')) {
-      return { isXml: true, isText: true, contentType: 'application/xml' };
+      return { isXml: true, isText: true, contentType: 'application/xml', isJson: false, isHtml: false, isCss: false };
+    }
+    
+    // In heuristic JS detection, if it looks like JSON (starts with { or [), flag isJson
+    const trimmedContent = contentStr.trim();
+    if ((trimmedContent.startsWith('{') && trimmedContent.endsWith('}')) || (trimmedContent.startsWith('[') && trimmedContent.endsWith(']'))) {
+      try {
+        JSON.parse(trimmedContent); // Validate if it's actual JSON
+        return { isJson: true, isText: true, contentType: 'application/json', isJavaScript: false, isHtml: false, isCss: false, isXml: false };
+      } catch (e) { /* Not valid JSON */ }
     }
   }
   
-  return { isText: false, isBinary: true, contentType: 'application/octet-stream' };
+  return { isText: false, isBinary: true, contentType: 'application/octet-stream', isHtml: false, isCss: false, isJavaScript: false, isJson: false, isXml: false };
 }
 
 /**
- * 增强的解压缩处理器
- * @param {Upstream} upstream 上游服务器信息
- * @param {ProxyResponse} proxyResponse 代理响应对象
- * @returns {ProxyResponse} 处理后的响应对象
+ * 响应内容解压缩处理器。
+ * 支持gzip, deflate, brotli编码。解压后更新响应内容和相关头部。
+ * @param {import('../entities').Upstream} upstream 上游服务器信息对象。
+ * @param {import('../entities').ProxyResponse} proxyResponse 代理响应对象。
+ * @returns {Promise<import('../entities').ProxyResponse>} 处理后的响应对象。
  */
 async function postDecompressHandler(upstream, proxyResponse) {
   try {
     const contentEncoding = proxyResponse.headers['content-encoding'];
     
-    if (!contentEncoding || !Buffer.isBuffer(proxyResponse.content)) {
+    if (!contentEncoding || !Buffer.isBuffer(proxyResponse.content) || proxyResponse.content.length === 0) {
       return proxyResponse;
     }
 
     const encoding = contentEncoding.toLowerCase();
     
     // 同步解压缩处理
-    try {
-      let decompressed;
-      
-      switch (encoding) {
-        case 'gzip':
-          decompressed = await gunzip(proxyResponse.content);
-          break;
-        case 'deflate':
-          decompressed = await inflate(proxyResponse.content);
-          break;
-        case 'br':
-          decompressed = await brotliDecompress(proxyResponse.content);
-          break;
-        default:
-          logger.warn('不支持的内容编码:', encoding);
-          return proxyResponse;
-      }
-      
-      logger.debug('内容解压缩成功', {
-        encoding: encoding,
-        originalSize: proxyResponse.content.length,
-        decompressedSize: decompressed.length
-      });
-      
-      // 更新内容和头部
-      proxyResponse.content = decompressed;
-      delete proxyResponse.headers['content-encoding'];
-      proxyResponse.headers['content-length'] = decompressed.length.toString();
-      
-    } catch (error) {
-      logger.error('内容解压缩失败:', error);
-      // 解压缩失败时，移除压缩头部但保留原内容
-      delete proxyResponse.headers['content-encoding'];
+    let decompressed;
+    
+    switch (encoding) {
+      case 'gzip':
+        decompressed = await gunzip(proxyResponse.content);
+        break;
+      case 'deflate':
+        decompressed = await inflate(proxyResponse.content);
+        break;
+      case 'br':
+        decompressed = await brotliDecompress(proxyResponse.content);
+        break;
+      default:
+        logger.warn('不支持的内容编码:', encoding);
+        return proxyResponse;
     }
-
+    
+    logger.debug('内容解压缩成功', {
+      encoding: encoding,
+      originalSize: proxyResponse.content.length,
+      decompressedSize: decompressed.length
+    });
+    
+    // 更新内容和头部
+    proxyResponse.content = decompressed;
+    delete proxyResponse.headers['content-encoding'];
+    proxyResponse.headers['content-length'] = decompressed.length.toString();
+    
     return proxyResponse;
   } catch (error) {
-    logger.error('解压缩处理器失败:', error);
+    logger.error('postDecompressHandler 执行失败:', { error: error.message, stack: error.stack });
+    // If decompression fails, it's often better to return the original content if possible, 
+    // but remove the content-encoding header to prevent client from trying to decompress corrupted data.
+    delete proxyResponse.headers['content-encoding'];
+    // throw new HandlerError(`postDecompressHandler 失败: ${error.message}`, 'postDecompressHandler', error); 
+    // Decided to return proxyResponse on decompression error to allow client to potentially still use it.
     return proxyResponse;
   }
 }
 
 /**
- * 增强的URL替换函数
- * @param {string} content 内容
- * @param {string} originalSite 原始站点
- * @param {string} proxySite 代理站点
- * @param {string} globalProxyPath 全局代理路径
- * @returns {string} 替换后的内容
+ * 增强的URL替换函数。
+ * 替换内容中的绝对URL、协议相对URL，并将其他域名的URL转换为全局代理格式。
+ * @param {string} content 要处理的内容字符串。
+ * @param {string} originalSite 原始站点URL (e.g., https://original.com)。
+ * @param {string} proxySite 代理站点URL (e.g., https://proxy.com)。
+ * @param {string} globalProxyPath 全局代理路径段。
+ * @returns {string} URL替换后的内容字符串。
  */
 function enhancedUrlReplace(content, originalSite, proxySite, globalProxyPath) {
   try {
@@ -174,40 +183,41 @@ function enhancedUrlReplace(content, originalSite, proxySite, globalProxyPath) {
     }
     
     // Base64编码函数
-    function safeBase64Encode(str) {
+    function _safeBase64EncodeUrl(str) {
       try {
-        return Buffer.from(encodeURIComponent(str).replace(/%([0-9A-F]{2})/g,
-          function toSolidBytes(match, p1) {
-            return String.fromCharCode('0x' + p1);
-          })).toString('base64');
+        // Directly encode the UTF-8 string to Base64
+        return Buffer.from(str, 'utf8').toString('base64');
       } catch (error) {
-        return encodeURIComponent(str);
+        // Fallback for safety, though Buffer.from should handle typical strings.
+        // Original fallback was encodeURIComponent, which is not a Base64 encoding.
+        // If an error occurs here, it's likely an issue with `str` itself.
+        // Returning the original string تغييرات  or a marker might be better than encodeURIComponent.
+        logger.warn('safeBase64EncodeUrl failed for input:', str, error);
+        return str; // Or perhaps a URL-safe version of the original string if base64 fails
       }
     }
     
     // 1. 替换绝对URL（http://、https://）
-    content = content.replace(new RegExp(originalSite, 'g'), proxySite);
+    // Ensure originalSite and proxySite are properly escaped for RegExp if they contain special chars
+    const escapedOriginalSite = originalSite.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    content = content.replace(new RegExp(escapedOriginalSite, 'g'), proxySite);
     
     // 2. 处理协议相对URL（//example.com）
-    const originalHost = originalSite.replace(/https?:\/\//, '');
-    const protocolRelativePattern = new RegExp(`//(?:www\\.)?${originalHost.replace(/\./g, '\\.')}`, 'g');
-    content = content.replace(protocolRelativePattern, `//${proxySite.replace(/https?:\/\//, '')}`);
+    const originalHost = new URL(originalSite).host.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const protocolRelativePattern = new RegExp(`//(?:www\\.)?${originalHost}`, 'g');
+    content = content.replace(protocolRelativePattern, `//${new URL(proxySite).host}`);
     
     // 3. 处理其他域名的URL，转换为全局代理格式
     const urlPattern = /(https?:\/\/[^\s"'<>()]+)/g;
     content = content.replace(urlPattern, (match) => {
-      // 如果已经是代理URL，不再处理
-      if (match.includes(proxySite) || match.includes(globalProxyPath)) {
+      if (match.startsWith(proxySite) || match.includes(`/${globalProxyPath}/`)) {
         return match;
       }
-      
-      // 转换为全局代理URL
-      const encodedUrl = safeBase64Encode(match);
+      // Avoid re-proxying URLs that are already pointing to common CDNs or known safe external domains if needed.
+      // For now, all external URLs not matching proxySite are re-proxied.
+      const encodedUrl = _safeBase64EncodeUrl(match);
       return `${proxySite}/${globalProxyPath}/${encodedUrl}`;
     });
-    
-    // 4. 处理相对URL（根据上下文）
-    // 这里可以根据需要添加更多的相对URL处理逻辑
     
     return content;
   } catch (error) {
@@ -217,12 +227,13 @@ function enhancedUrlReplace(content, originalSite, proxySite, globalProxyPath) {
 }
 
 /**
- * CSS特定处理函数
- * @param {string} cssContent CSS内容
- * @param {string} originalSite 原始站点
- * @param {string} proxySite 代理站点
- * @param {string} globalProxyPath 全局代理路径
- * @returns {string} 处理后的CSS内容
+ * CSS特定内容处理函数。
+ * 调用 enhancedUrlReplace 并额外处理CSS中的 @import 和 url() 语句。
+ * @param {string} cssContent CSS内容字符串。
+ * @param {string} originalSite 原始站点URL。
+ * @param {string} proxySite 代理站点URL。
+ * @param {string} globalProxyPath 全局代理路径段。
+ * @returns {string} 处理后的CSS内容字符串。
  */
 function processCssContent(cssContent, originalSite, proxySite, globalProxyPath) {
   try {
@@ -255,12 +266,13 @@ function processCssContent(cssContent, originalSite, proxySite, globalProxyPath)
 }
 
 /**
- * JavaScript特定处理函数
- * @param {string} jsContent JavaScript内容
- * @param {string} originalSite 原始站点
- * @param {string} proxySite 代理站点
- * @param {string} globalProxyPath 全局代理路径
- * @returns {string} 处理后的JavaScript内容
+ * JavaScript特定内容处理函数。
+ * 调用 enhancedUrlReplace 并额外处理JS中常见的URL模式，如fetch, XMLHttpRequest.open, location.href, window.open。
+ * @param {string} jsContent JavaScript内容字符串。
+ * @param {string} originalSite 原始站点URL。
+ * @param {string} proxySite 代理站点URL。
+ * @param {string} globalProxyPath 全局代理路径段。
+ * @returns {string} 处理后的JavaScript内容字符串。
  */
 function processJavaScriptContent(jsContent, originalSite, proxySite, globalProxyPath) {
   try {
@@ -299,12 +311,13 @@ function processJavaScriptContent(jsContent, originalSite, proxySite, globalProx
 }
 
 /**
- * HTML特定处理函数
- * @param {string} htmlContent HTML内容
- * @param {string} originalSite 原始站点
- * @param {string} proxySite 代理站点
- * @param {string} globalProxyPath 全局代理路径
- * @returns {string} 处理后的HTML内容
+ * HTML特定内容处理函数。
+ * 调用 enhancedUrlReplace 并额外处理HTML标签的属性如href, src, action以及内联style中的URL。
+ * @param {string} htmlContent HTML内容字符串。
+ * @param {string} originalSite 原始站点URL。
+ * @param {string} proxySite 代理站点URL。
+ * @param {string} globalProxyPath 全局代理路径段。
+ * @returns {string} 处理后的HTML内容字符串。
  */
 function processHtmlContent(htmlContent, originalSite, proxySite, globalProxyPath) {
   try {
@@ -362,15 +375,18 @@ function processHtmlContent(htmlContent, originalSite, proxySite, globalProxyPat
 }
 
 /**
- * 基础后置处理器 - 处理响应头
- * @param {Upstream} upstream 上游服务器信息
- * @param {ProxyResponse} proxyResponse 代理响应对象
- * @returns {ProxyResponse} 处理后的响应对象
+ * 基础后置处理器 - 主要处理响应头。
+ * 移除潜在冲突的安全头部，添加CORS头部，转换Location和Set-Cookie头部，确保文本类型编码。
+ * @param {import('../entities').Upstream} upstream 上游服务器信息对象。
+ * @param {import('../entities').ProxyResponse} proxyResponse 代理响应对象。
+ * @returns {import('../entities').ProxyResponse} 处理后的响应对象。
  */
 function postHandler(upstream, proxyResponse) {
   try {
     const headers = { ...proxyResponse.headers };
     const request = proxyResponse.proxyRequest;
+    const upstreamSite = upstream.site;
+    const proxySite = request?.site; // request might be null if proxyResponse was an error created early
 
     // 移除可能干扰的头部
     const headersToRemove = [
@@ -401,18 +417,28 @@ function postHandler(upstream, proxyResponse) {
 
     // 处理Location头部（重定向）
     if (headers['location']) {
-      headers['location'] = headers['location'].replace(upstream.site, request.site);
-      logger.debug('重定向URL转换:', headers['location']);
+      if (proxySite) {
+        headers['location'] = headers['location'].replace(upstreamSite, proxySite);
+        logger.debug('重定向URL转换:', { newLocation: headers['location'] });
+      } else {
+        logger.warn('无法转换Location头：缺少proxyRequest.site信息');
+      }
     }
 
     // 处理Set-Cookie头部
     if (headers['set-cookie']) {
-      if (Array.isArray(headers['set-cookie'])) {
-        headers['set-cookie'] = headers['set-cookie'].map(cookie => 
-          convertResponseCookie(cookie, upstream.site, request.site)
+      if (proxySite) {
+        headers['set-cookie'] = cookieManager.handleSetCookieFromUpstream(
+          headers['set-cookie'], 
+          upstreamSite, // URL the cookie was received from (upstream)
+          proxySite     // URL the client is talking to (proxy)
         );
       } else {
-        headers['set-cookie'] = convertResponseCookie(headers['set-cookie'], upstream.site, request.site);
+        logger.warn('无法转换Set-Cookie头：缺少proxyRequest.site信息');
+        // Decide: pass through original Set-Cookie, or remove, or attempt partial modification?
+        // Passing through is risky as domain/path will be for upstream.
+        // Removing is safest if proxySite is unknown.
+        delete headers['set-cookie'];
       }
     }
 
@@ -441,423 +467,231 @@ function postHandler(upstream, proxyResponse) {
 
     return proxyResponse;
   } catch (error) {
-    logger.error('后置处理器失败:', error);
-    return proxyResponse;
+    logger.error('postHandler 执行失败:', { error: error.message, stack: error.stack });
+    throw new HandlerError(`postHandler 失败: ${error.message}`, 'postHandler', error);
   }
 }
 
 /**
- * 增强的内容替换处理器
- * @param {Upstream} upstream 上游服务器信息
- * @param {ProxyResponse} proxyResponse 代理响应对象
- * @returns {ProxyResponse} 处理后的响应对象
+ * 内容替换后置处理器。
+ * 根据检测到的内容类型（HTML, CSS, JS）调用相应的处理函数进行URL替换，
+ * 并应用配置文件中的自定义替换规则。
+ * @param {import('../entities').Upstream} upstream 上游服务器信息对象。
+ * @param {import('../entities').ProxyResponse} proxyResponse 代理响应对象。
+ * @returns {import('../entities').ProxyResponse} 处理后的响应对象。
  */
 function postReplaceContentHandler(upstream, proxyResponse) {
   try {
     if (!proxyResponse.content) {
       return proxyResponse;
     }
-
-    // 检测内容类型
     const contentInfo = detectContentType(proxyResponse.headers, proxyResponse.content);
-    
-    // 对于二进制内容，直接返回不做处理
-    if (contentInfo.isBinary || !contentInfo.isText) {
-      logger.debug('跳过二进制内容处理', {
-        contentType: contentInfo.contentType,
-        isBinary: contentInfo.isBinary,
-        isText: contentInfo.isText
-      });
+    if (contentInfo.isBinary || !(contentInfo.isText || contentInfo.isJson || contentInfo.isJavaScript)) {
+      logger.debug('跳过非文本/JSON/JS内容处理', { contentType: contentInfo.contentType });
       return proxyResponse;
     }
-
-    // 转换为字符串
     let content = Buffer.isBuffer(proxyResponse.content) 
       ? proxyResponse.content.toString('utf-8')
       : proxyResponse.content.toString();
-
     if (!content) {
       return proxyResponse;
     }
-
     const request = proxyResponse.proxyRequest;
     const config = configLoader.getConfig();
-    
-    // 获取代理站点信息
     const proxySite = request.site;
     const globalProxyPath = config.globalProxyPath;
 
-    // 根据内容类型进行特定处理
     if (contentInfo.isHtml) {
       content = processHtmlContent(content, upstream.site, proxySite, globalProxyPath);
     } else if (contentInfo.isCss) {
       content = processCssContent(content, upstream.site, proxySite, globalProxyPath);
     } else if (contentInfo.isJavaScript) {
       content = processJavaScriptContent(content, upstream.site, proxySite, globalProxyPath);
+    } else if (contentInfo.isJson) {
+      content = enhancedUrlReplace(content, upstream.site, proxySite, globalProxyPath);
     } else {
-      // 通用文本处理
       content = enhancedUrlReplace(content, upstream.site, proxySite, globalProxyPath);
     }
 
-    // 执行配置中的替换规则
     const replaceList = config.replaceList || [];
     for (const replaceItem of replaceList) {
       try {
-        if (replaceItem.urlMatch && !new RegExp(replaceItem.urlMatch).test(request.urlNoSite)) {
-          continue;
-        }
-        
-        if (replaceItem.urlExclude && new RegExp(replaceItem.urlExclude).test(request.urlNoSite)) {
-          continue;
-        }
-        
-        if (replaceItem.contentType && !contentInfo.contentType.includes(replaceItem.contentType)) {
-          continue;
-        }
-
-        let searchStr = replaceItem.search;
-        let replaceStr = replaceItem.replace;
-
-        // 处理关键词替换
-        searchStr = searchStr
-          .replace(/\$upstream/g, upstream.site)
-          .replace(/\$custom_site/g, proxySite)
-          .replace(/\$scheme/g, new URL(proxySite).protocol.slice(0, -1))
-          .replace(/\$host/g, new URL(proxySite).host)
-          .replace(/\$PROXY/g, globalProxyPath);
-
-        replaceStr = replaceStr
-          .replace(/\$upstream/g, upstream.site)
-          .replace(/\$custom_site/g, proxySite)
-          .replace(/\$scheme/g, new URL(proxySite).protocol.slice(0, -1))
-          .replace(/\$host/g, new URL(proxySite).host)
-          .replace(/\$PROXY/g, globalProxyPath);
-
-        if (replaceItem.matchType === 2) {
-          // 正则表达式替换
-          const regex = new RegExp(searchStr, 'g');
-          content = content.replace(regex, replaceStr);
-        } else {
-          // 字符串替换
-          content = content.replace(new RegExp(searchStr, 'g'), replaceStr);
-        }
-      } catch (error) {
-        logger.warn('替换规则执行失败:', {
-          rule: replaceItem,
-          error: error.message
-        });
+        if (replaceItem.urlMatch && !new RegExp(replaceItem.urlMatch).test(request.urlNoSite)) continue;
+        if (replaceItem.urlExclude && new RegExp(replaceItem.urlExclude).test(request.urlNoSite)) continue;
+        if (replaceItem.contentType && !contentInfo.contentType.includes(replaceItem.contentType)) continue;
+        let searchStr = replaceItem.search.replace(/\$upstream/g, upstream.site).replace(/\$custom_site/g, proxySite).replace(/\$scheme/g, new URL(proxySite).protocol.slice(0, -1)).replace(/\$host/g, new URL(proxySite).host).replace(/\$PROXY/g, globalProxyPath);
+        let replaceStr = replaceItem.replace.replace(/\$upstream/g, upstream.site).replace(/\$custom_site/g, proxySite).replace(/\$scheme/g, new URL(proxySite).protocol.slice(0, -1)).replace(/\$host/g, new URL(proxySite).host).replace(/\$PROXY/g, globalProxyPath);
+        content = content.replace(new RegExp(searchStr, replaceItem.matchType === 2 ? 'g' : 'gi'), replaceStr); // use 'gi' for string replace for consistency if desired, or just 'g'
+      } catch (ruleError) {
+        logger.warn('替换规则执行失败:', { rule: replaceItem, error: ruleError.message });
       }
     }
-
-    // 更新内容
     proxyResponse.content = Buffer.from(content, 'utf-8');
-    
-    // 更新Content-Length
     if (proxyResponse.headers['content-length']) {
       proxyResponse.headers['content-length'] = proxyResponse.content.length.toString();
     }
-
-    logger.debug('内容替换处理完成', {
-      contentType: contentInfo.contentType,
-      originalSize: proxyResponse.content.length,
-      rulesApplied: replaceList.length
-    });
-
+    logger.debug('内容替换处理完成', { contentType: contentInfo.contentType, rulesApplied: replaceList.length });
     return proxyResponse;
   } catch (error) {
-    logger.error('内容替换处理器失败:', error);
-    return proxyResponse;
+    logger.error('postReplaceContentHandler 执行失败:', { error: error.message, stack: error.stack });
+    throw new HandlerError(`postReplaceContentHandler 失败: ${error.message}`, 'postReplaceContentHandler', error);
   }
 }
 
 /**
- * 增强的JavaScript注入处理器
- * @param {Upstream} upstream 上游服务器信息
- * @param {ProxyResponse} proxyResponse 代理响应对象
- * @returns {ProxyResponse} 处理后的响应对象
+ * JavaScript注入后置处理器。
+ * 向HTML响应中注入位于 static/inject.js 的脚本，并传递代理相关信息。
+ * @param {import('../entities').Upstream} upstream 上游服务器信息对象。
+ * @param {import('../entities').ProxyResponse} proxyResponse 代理响应对象。
+ * @returns {import('../entities').ProxyResponse} 处理后的响应对象。
  */
 function postInjectHandler(upstream, proxyResponse) {
   try {
-    // 只对HTML内容注入
     const contentType = proxyResponse.headers['content-type'] || '';
-    if (!contentType.includes('text/html')) {
+    if (!contentType.includes('text/html') || !proxyResponse.content) {
       return proxyResponse;
     }
-
-    if (!proxyResponse.content) {
-      return proxyResponse;
-    }
-
-    // 转换为字符串
-    let content = Buffer.isBuffer(proxyResponse.content) 
-      ? proxyResponse.content.toString('utf-8')
-      : proxyResponse.content.toString();
-
-    // 读取注入脚本
+    let content = Buffer.isBuffer(proxyResponse.content) ? proxyResponse.content.toString('utf-8') : proxyResponse.content.toString();
     const injectJsPath = path.join(__dirname, '../../static/inject.js');
-    
     if (!fs.existsSync(injectJsPath)) {
       logger.warn('注入脚本文件不存在:', injectJsPath);
       return proxyResponse;
     }
-
     let injectScript = fs.readFileSync(injectJsPath, 'utf-8');
-    
-    // 替换配置占位符
     const config = configLoader.getConfig();
     injectScript = injectScript.replace(/#global_proxy_path#/g, config.globalProxyPath || 'proxy-dGltZWhv');
-
-    // 添加当前站点信息到脚本中
-    const siteInfo = `
-    // 当前代理站点信息
-    window.__GPROXY_INFO__ = {
-      upstream: '${upstream.site}',
-      proxy: '${proxyResponse.proxyRequest.site}',
-      globalPath: '${config.globalProxyPath}',
-      timestamp: ${Date.now()}
-    };
-    `;
-
+    const siteInfo = `\nwindow.__GPROXY_INFO__ = { upstream: '${upstream.site}', proxy: '${proxyResponse.proxyRequest.site}', globalPath: '${config.globalProxyPath}', timestamp: ${Date.now()} };\n`;
     injectScript = siteInfo + injectScript;
-
-    // 创建完整的注入内容
-    const fullInjectScript = `
-    <script type="text/javascript">
-    (function() {
-      // 确保脚本只执行一次
-      if (window.__GPROXY_INJECTED__) return;
-      window.__GPROXY_INJECTED__ = true;
-      
-      ${injectScript}
-    })();
-    </script>
-    `;
-
-    // 智能注入位置选择
-    let injectionPoint = -1;
-    
-    // 优先在</head>之前注入
-    injectionPoint = content.indexOf('</head>');
+    const fullInjectScript = `\n<script type="text/javascript">\n(function() { if (window.__GPROXY_INJECTED__) return; window.__GPROXY_INJECTED__ = true; ${injectScript} })();\n</script>\n`;
+    let injectionPoint = content.indexOf('</head>');
     if (injectionPoint !== -1) {
       content = content.slice(0, injectionPoint) + fullInjectScript + content.slice(injectionPoint);
     } else {
-      // 其次在<body>之后注入
       injectionPoint = content.indexOf('<body');
       if (injectionPoint !== -1) {
         const bodyEnd = content.indexOf('>', injectionPoint);
-        if (bodyEnd !== -1) {
-          content = content.slice(0, bodyEnd + 1) + fullInjectScript + content.slice(bodyEnd + 1);
-        }
+        if (bodyEnd !== -1) content = content.slice(0, bodyEnd + 1) + fullInjectScript + content.slice(bodyEnd + 1);
+        else content += fullInjectScript; 
       } else {
-        // 最后在</html>之前注入
         injectionPoint = content.indexOf('</html>');
-        if (injectionPoint !== -1) {
-          content = content.slice(0, injectionPoint) + fullInjectScript + content.slice(injectionPoint);
-        } else {
-          // 如果都找不到，直接追加到末尾
-          content += fullInjectScript;
-        }
+        if (injectionPoint !== -1) content = content.slice(0, injectionPoint) + fullInjectScript + content.slice(injectionPoint);
+        else content += fullInjectScript;
       }
     }
-
-    // 更新内容
     proxyResponse.content = Buffer.from(content, 'utf-8');
-    
-    // 更新Content-Length
     if (proxyResponse.headers['content-length']) {
       proxyResponse.headers['content-length'] = proxyResponse.content.length.toString();
     }
-
-    logger.debug('JavaScript注入完成', {
-      injectionPoint: injectionPoint !== -1 ? 'found' : 'appended',
-      scriptSize: fullInjectScript.length
-    });
-
+    logger.debug('JavaScript注入完成', { injectionPoint: injectionPoint !== -1 ? 'found' : 'appended' });
     return proxyResponse;
   } catch (error) {
-    logger.error('JavaScript注入处理器失败:', error);
-    return proxyResponse;
+    logger.error('postInjectHandler 执行失败:', { error: error.message, stack: error.stack });
+    throw new HandlerError(`postInjectHandler 失败: ${error.message}`, 'postInjectHandler', error);
   }
 }
 
 /**
- * 转换响应Cookie
- * @param {string} cookie Cookie字符串
- * @param {string} upstreamSite 上游站点
- * @param {string} proxySite 代理站点
- * @returns {string} 转换后的Cookie
- */
-function convertResponseCookie(cookie, upstreamSite, proxySite) {
-  try {
-    // 基础域名替换
-    let converted = cookie.replace(
-      new RegExp(new URL(upstreamSite).hostname, 'g'),
-      new URL(proxySite).hostname
-    );
-
-    // 处理Domain属性
-    converted = converted.replace(/Domain=([^;]+)/gi, (match, domain) => {
-      const cleanDomain = domain.trim();
-      if (cleanDomain.includes(new URL(upstreamSite).hostname)) {
-        return `Domain=${new URL(proxySite).hostname}`;
-      }
-      return match;
-    });
-
-    // 处理Path属性 - 保持原有路径
-    // 移除Secure属性（如果代理服务器不是HTTPS）
-    if (new URL(proxySite).protocol === 'http:') {
-      converted = converted.replace(/;\s*Secure\s*(;|$)/gi, ';');
-    }
-
-    // 修改SameSite属性以适应代理
-    converted = converted.replace(/SameSite=Strict/gi, 'SameSite=Lax');
-    converted = converted.replace(/SameSite=None/gi, 'SameSite=Lax');
-
-    return converted;
-  } catch (error) {
-    logger.warn('Cookie转换失败:', error);
-    return cookie;
-  }
-}
-
-/**
- * 响应头优化处理器
- * @param {Upstream} upstream 上游服务器信息
- * @param {ProxyResponse} proxyResponse 代理响应对象
- * @returns {ProxyResponse} 处理后的响应对象
+ * 响应头优化后置处理器。
+ * 根据内容类型设置不同的Cache-Control策略，并在开发模式下添加调试头部。
+ * @param {import('../entities').Upstream} upstream 上游服务器信息对象。
+ * @param {import('../entities').ProxyResponse} proxyResponse 代理响应对象。
+ * @returns {import('../entities').ProxyResponse} 处理后的响应对象。
  */
 function postOptimizeHeadersHandler(upstream, proxyResponse) {
   try {
     const headers = proxyResponse.headers;
-    
-    // 优化缓存策略
     const contentType = headers['content-type'] || '';
-    
     if (contentType.includes('text/html')) {
-      // HTML页面：短期缓存
-      headers['cache-control'] = 'public, max-age=300'; // 5分钟
+      headers['cache-control'] = 'public, max-age=300';
     } else if (contentType.includes('application/javascript') || contentType.includes('text/css')) {
-      // JS/CSS：长期缓存
-      headers['cache-control'] = 'public, max-age=86400'; // 1天
+      headers['cache-control'] = 'public, max-age=86400';
     } else if (contentType.includes('image/')) {
-      // 图片：长期缓存
-      headers['cache-control'] = 'public, max-age=604800'; // 1周
+      headers['cache-control'] = 'public, max-age=604800';
     }
-    
-    // 添加代理标识（调试用）
     if (process.env.NODE_ENV === 'development') {
-      headers['x-gproxy-version'] = '2.0.0';
+      headers['x-gproxy-version'] = process.env.npm_package_version || '2.1.0'; // Use package version
       headers['x-gproxy-processed'] = new Date().toISOString();
     }
-    
+    // proxyResponse.headers is already a reference to headers, so modification is direct.
     return proxyResponse;
   } catch (error) {
-    logger.error('响应头优化失败:', error);
-    return proxyResponse;
+    logger.error('postOptimizeHeadersHandler 执行失败:', { error: error.message, stack: error.stack });
+    throw new HandlerError(`postOptimizeHeadersHandler 失败: ${error.message}`, 'postOptimizeHeadersHandler', error);
   }
 }
 
 /**
- * 智能错误页面处理器
- * @param {Upstream} upstream 上游服务器信息
- * @param {ProxyResponse} proxyResponse 代理响应对象
- * @returns {ProxyResponse} 处理后的响应对象
+ * 智能错误页面后置处理器。
+ * 如果响应是错误状态码且为简单HTML页面，则替换为自定义的、更友好的错误页面。
+ * @param {import('../entities').Upstream} upstream 上游服务器信息对象。
+ * @param {import('../entities').ProxyResponse} proxyResponse 代理响应对象。
+ * @returns {import('../entities').ProxyResponse} 处理后的响应对象。
  */
 function postErrorPageHandler(upstream, proxyResponse) {
   try {
-    // 只处理错误状态码
-    if (proxyResponse.statusCode < 400) {
-      return proxyResponse;
-    }
-    
+    if (proxyResponse.statusCode < 400) return proxyResponse;
     const contentType = proxyResponse.headers['content-type'] || '';
-    
-    // 只处理HTML错误页面
-    if (!contentType.includes('text/html')) {
-      return proxyResponse;
-    }
-    
-    let content = Buffer.isBuffer(proxyResponse.content) 
+    if (!contentType.includes('text/html')) return proxyResponse;
+    let currentContent = Buffer.isBuffer(proxyResponse.content) 
       ? proxyResponse.content.toString('utf-8')
       : proxyResponse.content.toString();
-    
-    // 如果是简单的错误页面，增强它
-    if (content.length < 500 || !content.includes('<html')) {
-      const enhancedErrorPage = `
-<!DOCTYPE html>
+    if (currentContent.length < 500 || !currentContent.toLowerCase().includes('<html')) {
+      const requestPath = proxyResponse.proxyRequest?.urlNoSite || '/';
+      const enhancedErrorPageHtml = _generateProxyErrorPageHtml(proxyResponse.statusCode, upstream.site, requestPath);
+      proxyResponse.content = Buffer.from(enhancedErrorPageHtml, 'utf-8');
+      proxyResponse.headers['content-type'] = 'text/html; charset=utf-8';
+      proxyResponse.headers['content-length'] = proxyResponse.content.length.toString();
+      logger.debug('已生成自定义错误页面', { statusCode: proxyResponse.statusCode });
+    }
+    return proxyResponse;
+  } catch (error) {
+    logger.error('postErrorPageHandler 执行失败:', { error: error.message, stack: error.stack });
+    throw new HandlerError(`postErrorPageHandler 失败: ${error.message}`, 'postErrorPageHandler', error);
+  }
+}
+
+/**
+ * @private
+ * Generates HTML for a custom proxy error page.
+ */
+function _generateProxyErrorPageHtml(statusCode, upstreamSite, requestPath) {
+  const friendlyMessage = getErrorMessage(statusCode);
+  const serverVersion = process.env.npm_package_version || '2.1.0'; // Try to get version from package.json
+
+  return `<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>代理错误 ${proxyResponse.statusCode}</title>
+    <title>代理错误 ${statusCode}</title>
     <style>
-        body { 
-            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-            margin: 0; padding: 40px; 
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: #333; min-height: 100vh;
-            display: flex; align-items: center; justify-content: center;
-        }
-        .container { 
-            background: white; border-radius: 10px; 
-            padding: 40px; box-shadow: 0 10px 30px rgba(0,0,0,0.1);
-            max-width: 600px; text-align: center;
-        }
-        .error-code { 
-            font-size: 4em; font-weight: bold; 
-            color: #e74c3c; margin-bottom: 20px;
-        }
-        .error-message { 
-            font-size: 1.2em; margin-bottom: 30px; 
-            color: #555;
-        }
-        .details { 
-            background: #f8f9fa; padding: 20px; 
-            border-radius: 5px; margin: 20px 0;
-            text-align: left; font-family: monospace;
-        }
-        .retry-btn {
-            background: #3498db; color: white;
-            padding: 12px 24px; border: none;
-            border-radius: 5px; cursor: pointer;
-            font-size: 1em; margin: 10px;
-            transition: background 0.3s;
-        }
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; margin: 0; padding: 40px; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: #333; min-height: 100vh; display: flex; align-items: center; justify-content: center; }
+        .container { background: white; border-radius: 10px; padding: 40px; box-shadow: 0 10px 30px rgba(0,0,0,0.1); max-width: 600px; text-align: center; }
+        .error-code { font-size: 4em; font-weight: bold; color: #e74c3c; margin-bottom: 20px; }
+        .error-message { font-size: 1.2em; margin-bottom: 30px; color: #555; }
+        .details { background: #f8f9fa; padding: 20px; border-radius: 5px; margin: 20px 0; text-align: left; font-family: monospace; word-break: break-all; }
+        .retry-btn { background: #3498db; color: white; padding: 12px 24px; border: none; border-radius: 5px; cursor: pointer; font-size: 1em; margin: 10px; transition: background 0.3s; }
         .retry-btn:hover { background: #2980b9; }
         .footer { margin-top: 30px; color: #7f8c8d; font-size: 0.9em; }
     </style>
 </head>
 <body>
     <div class="container">
-        <div class="error-code">${proxyResponse.statusCode}</div>
-        <div class="error-message">
-            ${getErrorMessage(proxyResponse.statusCode)}
-        </div>
+        <div class="error-code">${statusCode}</div>
+        <div class="error-message">${friendlyMessage}</div>
         <div class="details">
-            <strong>请求地址:</strong> ${upstream.site}<br>
-            <strong>代理服务器:</strong> Gproxy-Node v2.0.0<br>
+            <strong>请求地址:</strong> ${upstreamSite}${requestPath || '/'}<br>
+            <strong>代理服务器:</strong> Gproxy-Node v${serverVersion}<br>
             <strong>时间:</strong> ${new Date().toLocaleString('zh-CN')}
         </div>
         <button class="retry-btn" onclick="location.reload()">重试</button>
         <button class="retry-btn" onclick="history.back()">返回</button>
         <div class="footer">
-            如果问题持续存在，请联系管理员或稍后重试
+            如果问题持续存在，请联系管理员或稍后重试。
         </div>
     </div>
 </body>
 </html>`;
-      
-      proxyResponse.content = Buffer.from(enhancedErrorPage, 'utf-8');
-      proxyResponse.headers['content-type'] = 'text/html; charset=utf-8';
-      proxyResponse.headers['content-length'] = proxyResponse.content.length.toString();
-    }
-    
-    return proxyResponse;
-  } catch (error) {
-    logger.error('错误页面处理失败:', error);
-    return proxyResponse;
-  }
 }
 
 /**
@@ -897,5 +731,5 @@ module.exports = {
   detectContentType,
   
   // 工具函数
-  convertResponseCookie
+  detectContentType
 }; 

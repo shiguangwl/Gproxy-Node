@@ -1,8 +1,10 @@
 const winston = require('winston');
 const path = require('path');
+const fs = require('fs-extra');
 
 // 创建日志目录
 const logDir = path.join(process.cwd(), 'logs');
+fs.ensureDirSync(logDir);
 
 const logger = winston.createLogger({
   level: process.env.NODE_ENV === 'production' ? 'info' : 'debug',
@@ -36,7 +38,8 @@ if (process.env.NODE_ENV !== 'production') {
   logger.add(new winston.transports.Console({
     format: winston.format.combine(
       winston.format.colorize(),
-      winston.format.simple()
+      winston.format.timestamp({ format: 'YYYY-MM-DD HH:mm:ss' }),
+      winston.format.printf(info => `${info.timestamp} ${info.level}: ${info.message}${info.stack ? '\n' + info.stack : ''}`)
     )
   }));
 }
