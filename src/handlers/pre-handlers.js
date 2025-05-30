@@ -1,6 +1,6 @@
 const CookieManager = require('../utils/cookie-parser');
 const logger = require('../utils/logger');
-const configLoader = require('../config/config-loader');
+const configLoader = require('../../config/config-loader');
 const { HandlerError } = require('../utils/errors');
 
 const cookieManager = new CookieManager();

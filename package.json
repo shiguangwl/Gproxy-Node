@@ -8,26 +8,33 @@
     "dev": "nodemon server.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
-  "keywords": ["proxy", "web-proxy", "reverse-proxy", "nodejs", "cloudflare-bypass"],
+  "keywords": [
+    "proxy",
+    "web-proxy",
+    "reverse-proxy",
+    "nodejs",
+    "cloudflare-bypass"
+  ],
   "author": "",
   "license": "MIT",
   "dependencies": {
-    "express": "^4.18.2",
     "axios": "^1.6.0",
-    "tough-cookie": "^4.1.3",
     "compression": "^1.7.4",
-    "helmet": "^7.1.0",
-    "winston": "^3.11.0",
-    "fs-extra": "^11.1.1",
     "cors": "^2.8.5",
     "dotenv": "^16.3.1",
+    "express": "^4.18.2",
+    "fs-extra": "^11.1.1",
+    "got": "^11.8.6",
+    "helmet": "^7.1.0",
+    "http2-wrapper": "^2.2.1",
+    "puppeteer-core": "^24.9.0",
     "puppeteer-extra": "^3.3.6",
     "puppeteer-extra-plugin-stealth": "^2.11.2",
-    "got": "^11.8.6",
-    "user-agents": "^1.1.200",
     "random-useragent": "^0.5.0",
-    "http2-wrapper": "^2.2.1",
-    "tls": "^0.0.1"
+    "tls": "^0.0.1",
+    "tough-cookie": "^4.1.3",
+    "user-agents": "^1.1.200",
+    "winston": "^3.11.0"
   },
   "devDependencies": {
     "nodemon": "^3.0.1"
@@ -35,4 +42,4 @@
   "engines": {
     "node": ">=16.0.0"
   }
-} 
+}
